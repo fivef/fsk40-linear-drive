@@ -49,6 +49,12 @@ ESP8266WebServer server(80);
 
 bool driverEnabled = false;
 
+// Latched when the limit switch (assumed at the min-end, position 0) triggers.
+// While latched, motion toward the switch is refused; only moves to a strictly
+// larger position are accepted. The latch is cleared by /home or by a /jog in
+// the positive direction once the switch reads "clear".
+bool limitTripped = false;
+
 void enableDriver(bool on) {
     digitalWrite(PIN_ENABLE, on ? ENABLE_ACTIVE : ENABLE_INACTIVE);
     driverEnabled = on;
@@ -60,6 +66,22 @@ long mmToSteps(float mm) {
 
 float stepsToMm(long steps) {
     return static_cast<float>(steps) / STEPS_PER_MM;
+}
+
+// Debounced read of the limit switch (active LOW with INPUT_PULLUP).
+// Returns true if the switch is currently triggered.
+bool limitSwitchTriggered() {
+    if (digitalRead(PIN_LIMIT) != LOW) return false;
+    delayMicroseconds(500);
+    return digitalRead(PIN_LIMIT) == LOW;
+}
+
+// Hard halt: cancel any pending motion immediately (no decel) and latch.
+// AccelStepper::stop() only schedules a decel, which is unsafe when we have
+// already crashed into an end-stop.
+void hardHalt() {
+    stepper.moveTo(stepper.currentPosition());
+    stepper.setSpeed(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +156,7 @@ void handleStatus() {
     s += "speed   : " + String(stepper.maxSpeed() / STEPS_PER_MM, 2) + " mm/s\n";
     s += "accel   : " + String(stepper.acceleration() / STEPS_PER_MM, 2) + " mm/s^2\n";
     s += "limit   : " + String(digitalRead(PIN_LIMIT) == LOW ? "TRIGGERED" : "clear") + "\n";
+    s += "latched : " + String(limitTripped ? "yes (move + to clear)" : "no") + "\n";
     server.send(200, "text/plain", s);
 }
 
@@ -142,9 +165,11 @@ void handleDisable() { stepper.stop(); enableDriver(false); server.send(200, "te
 void handleStop()    { stepper.stop(); server.send(200, "text/plain", "ok"); }
 
 void handleHome() {
-    // Treat current position as zero. Replace with a real homing routine that
-    // drives toward PIN_LIMIT until triggered if you have an end-stop installed.
+    // Treat current position as zero and clear any limit-switch latch. Replace
+    // with a real homing routine that drives toward PIN_LIMIT until triggered
+    // if you have an end-stop installed.
     stepper.setCurrentPosition(0);
+    limitTripped = false;
     server.send(200, "text/plain", "ok");
 }
 
@@ -152,8 +177,16 @@ void handleMove() {
     if (!server.hasArg("pos")) { server.send(400, "text/plain", "missing pos"); return; }
     float mm = server.arg("pos").toFloat();
     mm = constrain(mm, 0.0f, MAX_TRAVEL_MM);
+    long targetSteps = mmToSteps(mm);
+
+    // If the limit (min-end) is latched, refuse any move that does not strictly
+    // retreat from the switch.
+    if (limitTripped && targetSteps <= stepper.currentPosition()) {
+        server.send(409, "text/plain", "limit latched: jog + to clear or /home");
+        return;
+    }
     if (!driverEnabled) enableDriver(true);
-    stepper.moveTo(mmToSteps(mm));
+    stepper.moveTo(targetSteps);
     server.send(200, "text/plain", "ok");
 }
 
@@ -162,8 +195,23 @@ void handleJog() {
     float delta = server.arg("d").toFloat();
     float target = stepsToMm(stepper.currentPosition()) + delta;
     target = constrain(target, 0.0f, MAX_TRAVEL_MM);
+    long targetSteps = mmToSteps(target);
+
+    if (limitTripped) {
+        // Only allow positive (away-from-switch) jogs, and only once the
+        // switch has physically released, to avoid grinding back into it.
+        if (delta <= 0.0f) {
+            server.send(409, "text/plain", "limit latched: only positive jog allowed");
+            return;
+        }
+        if (limitSwitchTriggered()) {
+            server.send(409, "text/plain", "limit still triggered, release switch first");
+            return;
+        }
+        limitTripped = false;
+    }
     if (!driverEnabled) enableDriver(true);
-    stepper.moveTo(mmToSteps(target));
+    stepper.moveTo(targetSteps);
     server.send(200, "text/plain", "ok");
 }
 
@@ -190,9 +238,10 @@ void setup() {
 
     stepper.setMaxSpeed(DEFAULT_SPEED_MM_S * STEPS_PER_MM);
     stepper.setAcceleration(DEFAULT_ACCEL_MM_S2 * STEPS_PER_MM);
-    stepper.setEnablePin(PIN_ENABLE);
-    stepper.setPinsInverted(false, false, true); // step, dir, enable (enable active LOW)
-    stepper.disableOutputs();
+    // NOTE: The enable line is owned exclusively by enableDriver() / digitalWrite
+    // on PIN_ENABLE. We deliberately do NOT call stepper.setEnablePin() so
+    // AccelStepper never toggles the pin on its own (which would race with our
+    // manual control and could leave the driver disabled or stuck enabled).
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -226,17 +275,16 @@ void setup() {
 void loop() {
     server.handleClient();
 
-    // Soft limit check
-    long minSteps = 0;
-    long maxSteps = mmToSteps(MAX_TRAVEL_MM);
-    long cur = stepper.currentPosition();
-    if (cur < minSteps || cur > maxSteps) {
-        stepper.stop();
-    }
-
-    // Emergency stop on limit switch (active LOW with INPUT_PULLUP)
-    if (digitalRead(PIN_LIMIT) == LOW && stepper.isRunning()) {
-        stepper.stop();
+    // Hard end-stop on limit switch (active LOW with INPUT_PULLUP). Latch so
+    // further motion into the switch is refused until the user retreats from
+    // it or re-homes. AccelStepper::stop() only schedules a decel and would
+    // continue driving into the end-stop, so we cancel the target outright.
+    if (limitSwitchTriggered()) {
+        if (!limitTripped) {
+            hardHalt();
+            limitTripped = true;
+            Serial.println(F("LIMIT triggered: motion latched"));
+        }
     }
 
     stepper.run();
