@@ -26,20 +26,20 @@ constexpr uint8_t PIN_LIMIT  = D5;
 // Motion configuration
 // ---------------------------------------------------------------------------
 // Steps per millimetre of travel on the linear guide.
-//   Example: 1.8deg motor (200 steps/rev) + 1/16 microstepping + 8 mm/rev
-//   lead screw  =>  200 * 16 / 8 = 400 steps/mm
-constexpr float STEPS_PER_MM = 400.0f;
+//   Example:  (400 steps/rev) + 10 mm/rev
+//   lead screw  =>  400 / 10 = 400 steps/mm
+constexpr float STEPS_PER_MM = 40.0f;
 
 // Maximum travel of the guide in millimetres (soft limit).
-constexpr float MAX_TRAVEL_MM = 300.0f;
+constexpr float MAX_TRAVEL_MM = 1000.0f;
 
 // Default motion profile.
 constexpr float DEFAULT_SPEED_MM_S = 20.0f;   // mm/s
-constexpr float DEFAULT_ACCEL_MM_S2 = 100.0f; // mm/s^2
+constexpr float DEFAULT_ACCEL_MM_S2 = 50.0f; // mm/s^2
 
-// Driver enable is typically active LOW.
-constexpr uint8_t ENABLE_ACTIVE = LOW;
-constexpr uint8_t ENABLE_INACTIVE = HIGH;
+// Driver enable is typically active HIGH.
+constexpr uint8_t ENABLE_ACTIVE = HIGH;
+constexpr uint8_t ENABLE_INACTIVE = LOW;
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -230,7 +230,7 @@ void setup() {
     Serial.begin(115200);
     delay(100);
     Serial.println();
-    Serial.println(F("Linear guide controller starting..."));
+    Serial.println(F("Linear guide controller starting...")); Serial.println(F("Debug: Firmware version 1.0"));
 
     pinMode(PIN_ENABLE, OUTPUT);
     enableDriver(false);
@@ -244,6 +244,8 @@ void setup() {
     // manual control and could leave the driver disabled or stuck enabled).
 
     WiFi.mode(WIFI_STA);
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.printf("Connecting to %s", WIFI_SSID);
     uint32_t start = millis();
@@ -252,10 +254,17 @@ void setup() {
         Serial.print('.');
     }
     Serial.println();
-    if (WiFi.status() == WL_CONNECTED) {
+if (WiFi.status() == WL_CONNECTED) {
+        Serial.println(F("Debug: WiFi connected"));
         Serial.print(F("IP: "));
         Serial.println(WiFi.localIP());
+        Serial.print(F("Debug: MAC: "));
+        Serial.println(WiFi.macAddress());
+        Serial.print(F("Debug: RSSI: "));
+        Serial.print(WiFi.RSSI());
+        Serial.println(F(" dBm"));
     } else {
+        Serial.println(F("Debug: WiFi connection failed"));
         Serial.println(F("WiFi not connected, continuing without network."));
     }
 
@@ -270,6 +279,7 @@ void setup() {
     server.on("/profile", handleProfile);
     server.begin();
     Serial.println(F("HTTP server started"));
+    Serial.println(F("Debug: Setup complete"));
 }
 
 void loop() {

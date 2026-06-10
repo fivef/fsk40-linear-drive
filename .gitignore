@@ -9,4 +9,4 @@
 *.swo
 *~
 .DS_Store
-Thumbs.db
+secrets.ini
