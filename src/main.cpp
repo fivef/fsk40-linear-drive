@@ -195,7 +195,7 @@ void handleJog() {
     if (!server.hasArg("d")) { server.send(400, "text/plain", "missing d"); return; }
     float delta = server.arg("d").toFloat();
     float target = stepsToMm(stepper.currentPosition()) + delta;
-    target = constrain(target, 0.0f, MAX_TRAVEL_MM);
+    target = constrain(target, -MAX_TRAVEL_MM, MAX_TRAVEL_MM);
     long targetSteps = mmToSteps(target);
 
     if (limitTripped) {
@@ -239,6 +239,7 @@ void setup() {
 
     stepper.setMaxSpeed(DEFAULT_SPEED_MM_S * STEPS_PER_MM);
     stepper.setAcceleration(DEFAULT_ACCEL_MM_S2 * STEPS_PER_MM);
+    stepper.setPinsInverted(true, false, false);
     // NOTE: The enable line is owned exclusively by enableDriver() / digitalWrite
     // on PIN_ENABLE. We deliberately do NOT call stepper.setEnablePin() so
     // AccelStepper never toggles the pin on its own (which would race with our
