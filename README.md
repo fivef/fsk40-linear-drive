@@ -105,17 +105,38 @@ wiring differs.
 ## Build & flash
 
 Install [PlatformIO](https://platformio.org/) (VS Code extension or
-standalone CLI), then from the project root:
+standalone CLI), then from the project root.
+
+### First-time flash (USB)
+
+Create `secrets.ini` (see [WiFi credentials](#wifi-credentials)), then
+upload over the serial/USB connection:
 
 ```bash
-pio run                  # compile
-pio run -t upload        # build + flash via USB
+pio run -t upload --upload-protocol serial
 pio device monitor       # serial monitor @ 115200 baud
 ```
 
 On boot the firmware prints the assigned IP on the serial monitor (or
 reports `WiFi not connected, continuing without network.` after the 20 s
 timeout).
+
+### Subsequent flashes (OTA)
+
+Once the device is on the network, upload over the air. The
+`platformio.ini` already sets `upload_protocol = espota` and
+`upload_port = linear-guide.local`, so a plain:
+
+```bash
+pio run -t upload
+```
+
+…will find the device via mDNS. You can also override the target
+explicitly:
+
+```bash
+pio run -t upload --upload-port 192.168.1.42
+```
 
 ## HTTP API
 
