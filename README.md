@@ -71,12 +71,12 @@ The limit switch is treated as a hard end-stop:
 
 Credentials live in `secrets.ini` (untracked, excluded by `.gitignore`):
 
-```ini
-[env:nodemcuv2]
+ ```ini
+[*]
 build_flags =
-    -D WIFI_SSID=\"your_ssid\"
-    -D WIFI_PASSWORD=\"your_password\"
-```
+     -D WIFI_SSID=\"your_ssid\"
+     -D WIFI_PASSWORD=\"your_password\"
+ ```
 
 `platformio.ini` references it via `extra_configs = secrets.ini`. Create this
 file from the template above if you are setting up a fresh checkout.
@@ -113,7 +113,7 @@ Create `secrets.ini` (see [WiFi credentials](#wifi-credentials)), then
 upload over the serial/USB connection:
 
 ```bash
-pio run -t upload --upload-protocol serial
+pio run -t upload -e nodemcuv2_usb
 pio device monitor       # serial monitor @ 115200 baud
 ```
 
