@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ArduinoOTA.h>
 #include <AccelStepper.h>
 
 // ---------------------------------------------------------------------------
@@ -34,8 +35,8 @@ constexpr float STEPS_PER_MM = 40.0f;
 constexpr float MAX_TRAVEL_MM = 1000.0f;
 
 // Default motion profile.
-constexpr float DEFAULT_SPEED_MM_S = 20.0f;   // mm/s
-constexpr float DEFAULT_ACCEL_MM_S2 = 50.0f; // mm/s^2
+constexpr float DEFAULT_SPEED_MM_S = 100.0f;   // mm/s
+constexpr float DEFAULT_ACCEL_MM_S2 = 100.0f; // mm/s^2
 
 // Driver enable is typically active HIGH.
 constexpr uint8_t ENABLE_ACTIVE = HIGH;
@@ -125,7 +126,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   </div>
   <h3>Speed / Accel (mm/s, mm/s^2)</h3>
   <div class="row">
-    <input id="spd" type="number" step="1" value="20">
+    <input id="spd" type="number" step="1" value="100">
     <input id="acc" type="number" step="1" value="100">
     <button onclick="cmd('/profile?speed=' + document.getElementById('spd').value + '&accel=' + document.getElementById('acc').value)">Apply</button>
   </div>
@@ -279,10 +280,31 @@ if (WiFi.status() == WL_CONNECTED) {
     server.on("/profile", handleProfile);
     server.begin();
     Serial.println(F("HTTP server started"));
+
+    ArduinoOTA.setHostname("fsk40-linear-drive");
+
+    ArduinoOTA.onStart([]() {
+        Serial.println(F("OTA: start"));
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println(F("OTA: end"));
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("OTA: %u%%\r", progress / (total / 100));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("OTA: error %u\n", error);
+    });
+
+    ArduinoOTA.begin();
+    Serial.println(F("OTA ready"));
+
     Serial.println(F("Debug: Setup complete"));
 }
 
 void loop() {
+    ArduinoOTA.handle();
+
     server.handleClient();
 
     // Hard end-stop on limit switch (active LOW with INPUT_PULLUP). Latch so
