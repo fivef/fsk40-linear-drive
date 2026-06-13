@@ -247,6 +247,7 @@ void setup() {
 
     WiFi.mode(WIFI_STA);
     WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    WiFi.hostname("fsk40-linear-drive"); 
     WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.printf("Connecting to %s", WIFI_SSID);

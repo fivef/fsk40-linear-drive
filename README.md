@@ -125,7 +125,7 @@ timeout).
 
 Once the device is on the network, upload over the air. The
 `platformio.ini` already sets `upload_protocol = espota` and
-`upload_port = linear-guide.local`, so a plain:
+`upload_port = fsk40-linear-drive.local`, so a plain:
 
 ```bash
 pio run -t upload
