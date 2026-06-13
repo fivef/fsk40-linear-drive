@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <DNSServer.h>
+#include <EEPROM.h>
 #include <ArduinoOTA.h>
 #include <AccelStepper.h>
 
@@ -43,12 +45,30 @@ constexpr uint8_t ENABLE_ACTIVE = HIGH;
 constexpr uint8_t ENABLE_INACTIVE = LOW;
 
 // ---------------------------------------------------------------------------
+// EEPROM / WiFi credential storage
+// ---------------------------------------------------------------------------
+constexpr int EEPROM_SIZE = 128;
+constexpr int EEPROM_CRED_FLAG = 0;
+constexpr int EEPROM_SSID_ADDR = 1;
+constexpr int EEPROM_PASS_ADDR = 33;
+constexpr uint8_t CRED_MAGIC = 0xAA;
+
+// ---------------------------------------------------------------------------
+// Captive portal (AP mode) configuration
+// ---------------------------------------------------------------------------
+constexpr int AP_CHANNEL = 1;
+constexpr int AP_MAX_CLIENTS = 4;
+constexpr unsigned long AP_CONNECT_TIMEOUT_MS = 20000;
+
+// ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 ESP8266WebServer server(80);
+DNSServer dnsServer;
 
 bool driverEnabled = false;
+bool apMode = false;
 
 // Latched when the limit switch (assumed at the min-end, position 0) triggers.
 // While latched, motion toward the switch is refused; only moves to a strictly
@@ -83,6 +103,128 @@ bool limitSwitchTriggered() {
 void hardHalt() {
     stepper.moveTo(stepper.currentPosition());
     stepper.setSpeed(0);
+}
+
+// ---------------------------------------------------------------------------
+// EEPROM credential helpers
+// ---------------------------------------------------------------------------
+bool readCredentials(String &ssid, String &pass) {
+    EEPROM.begin(EEPROM_SIZE);
+    if (EEPROM.read(EEPROM_CRED_FLAG) != CRED_MAGIC) {
+        EEPROM.end();
+        return false;
+    }
+    char ssidBuf[33];
+    for (int i = 0; i < 32; i++) {
+        ssidBuf[i] = EEPROM.read(EEPROM_SSID_ADDR + i);
+        if (ssidBuf[i] == '\0') break;
+    }
+    ssidBuf[32] = '\0';
+    ssid = String(ssidBuf);
+    char passBuf[65];
+    for (int i = 0; i < 64; i++) {
+        passBuf[i] = EEPROM.read(EEPROM_PASS_ADDR + i);
+        if (passBuf[i] == '\0') break;
+    }
+    passBuf[64] = '\0';
+    pass = String(passBuf);
+    EEPROM.end();
+    return true;
+}
+
+void writeCredentials(const String &ssid, const String &pass) {
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.write(EEPROM_CRED_FLAG, CRED_MAGIC);
+    for (unsigned int i = 0; i < 32 && i < ssid.length(); i++) {
+        EEPROM.write(EEPROM_SSID_ADDR + i, ssid[i]);
+    }
+    for (unsigned int i = ssid.length(); i < 32; i++) {
+        EEPROM.write(EEPROM_SSID_ADDR + i, '\0');
+    }
+    for (unsigned int i = 0; i < 64 && i < pass.length(); i++) {
+        EEPROM.write(EEPROM_PASS_ADDR + i, pass[i]);
+    }
+    for (unsigned int i = pass.length(); i < 64; i++) {
+        EEPROM.write(EEPROM_PASS_ADDR + i, '\0');
+    }
+    EEPROM.commit();
+    EEPROM.end();
+}
+
+// ---------------------------------------------------------------------------
+// Captive portal (AP mode)
+// ---------------------------------------------------------------------------
+const char CONFIG_HTML[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WiFi Setup — Linear Guide</title>
+  <style>
+    body{font-family:sans-serif;margin:2em;max-width:480px}
+    input{font-size:1em;padding:.4em .6em;margin:.2em;width:100%;box-sizing:border-box}
+    button{font-size:1em;padding:.6em 1em;margin:.2em}
+    label{display:block;margin-top:.8em;font-weight:bold}
+    h1{font-size:1.3em}
+    .hint{color:#666;font-size:.9em;margin-top:.3em}
+  </style>
+</head>
+<body>
+  <h1>&#9881; Linear Guide WiFi Setup</h1>
+  <p>Enter your 2.4&nbsp;GHz WiFi credentials. The device will save them permanently and reboot.</p>
+  <form method="POST" action="/save">
+    <label for="ssid">Network name (SSID)</label>
+    <input id="ssid" name="ssid" placeholder="e.g. MyHomeWiFi" required>
+    <label for="pass">Password</label>
+    <input id="pass" name="pass" type="password" placeholder="leave empty for open network">
+    <p><button type="submit">Save &amp; Connect</button></p>
+  </form>
+  <div class="hint">Connect to the <strong>LinearGuide-XXXX</strong> network to configure.</div>
+</body>
+</html>
+)HTML";
+
+const char SAVED_HTML[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>WiFi Saved — Linear Guide</title>
+  <style>
+    body{font-family:sans-serif;margin:2em;max-width:480px;text-align:center}
+    .ok{color:#090;font-size:2em}
+  </style>
+</head>
+<body>
+  <p class="ok">&#10003;</p>
+  <h1>Credentials Saved</h1>
+  <p>Device is rebooting and will try to connect to your WiFi network.</p>
+  <p>Once connected, find it via the serial monitor or your router's DHCP lease list.</p>
+</body>
+</html>
+)HTML";
+
+void startAPMode() {
+    apMode = true;
+
+    // Derive AP SSID from the chip's MAC to make it unique.
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char apSsid[24];
+    snprintf_P(apSsid, sizeof(apSsid), PSTR("LinearGuide-%02X%02X"), mac[4], mac[5]);
+
+    WiFi.mode(WIFI_AP);
+    WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+    WiFi.softAP(apSsid, nullptr, AP_CHANNEL, false, AP_MAX_CLIENTS);
+
+    dnsServer.start(53, "*", WiFi.softAPIP());
+
+    Serial.print(F("AP mode started. SSID: "));
+    Serial.println(apSsid);
+    Serial.print(F("AP IP: "));
+    Serial.println(WiFi.softAPIP());
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +287,38 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 )HTML";
 
 void handleRoot() {
-    server.send_P(200, "text/html", INDEX_HTML);
+    if (apMode) {
+        server.send_P(200, "text/html", CONFIG_HTML);
+    } else {
+        server.send_P(200, "text/html", INDEX_HTML);
+    }
+}
+
+void handleConfig() {
+    server.send_P(200, "text/html", CONFIG_HTML);
+}
+
+void handleSave() {
+    if (!server.hasArg("ssid")) {
+        server.send(400, "text/plain", "missing ssid");
+        return;
+    }
+    String ssid = server.arg("ssid");
+    String pass = server.hasArg("pass") ? server.arg("pass") : "";
+
+    ssid.trim();
+    if (ssid.length() == 0) {
+        server.send(400, "text/plain", "SSID cannot be empty");
+        return;
+    }
+
+    writeCredentials(ssid, pass);
+    server.send_P(200, "text/html", SAVED_HTML);
+    server.close();
+    delay(500);
+
+    Serial.printf("Credentials saved. SSID: %s. Rebooting...\n", ssid.c_str());
+    ESP.restart();
 }
 
 void handleStatus() {
@@ -166,9 +339,6 @@ void handleDisable() { stepper.stop(); enableDriver(false); server.send(200, "te
 void handleStop()    { stepper.stop(); server.send(200, "text/plain", "ok"); }
 
 void handleHome() {
-    // Treat current position as zero and clear any limit-switch latch. Replace
-    // with a real homing routine that drives toward PIN_LIMIT until triggered
-    // if you have an end-stop installed.
     stepper.setCurrentPosition(0);
     limitTripped = false;
     server.send(200, "text/plain", "ok");
@@ -180,8 +350,6 @@ void handleMove() {
     mm = constrain(mm, 0.0f, MAX_TRAVEL_MM);
     long targetSteps = mmToSteps(mm);
 
-    // If the limit (min-end) is latched, refuse any move that does not strictly
-    // retreat from the switch.
     if (limitTripped && targetSteps <= stepper.currentPosition()) {
         server.send(409, "text/plain", "limit latched: jog + to clear or /home");
         return;
@@ -199,8 +367,6 @@ void handleJog() {
     long targetSteps = mmToSteps(target);
 
     if (limitTripped) {
-        // Only allow positive (away-from-switch) jogs, and only once the
-        // switch has physically released, to avoid grinding back into it.
         if (delta <= 0.0f) {
             server.send(409, "text/plain", "limit latched: only positive jog allowed");
             return;
@@ -225,13 +391,35 @@ void handleProfile() {
 }
 
 // ---------------------------------------------------------------------------
+// WiFi connection helper
+// ---------------------------------------------------------------------------
+bool tryConnect(const String &ssid, const String &pass, unsigned long timeoutMs) {
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
+    WiFi.hostname("fsk40-linear-drive");
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    Serial.printf("Connecting to %s", ssid.c_str());
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+        delay(250);
+        Serial.print('.');
+    }
+    Serial.println();
+
+    return WiFi.status() == WL_CONNECTED;
+}
+
+// ---------------------------------------------------------------------------
 // Setup / loop
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
     delay(100);
     Serial.println();
-    Serial.println(F("Linear guide controller starting...")); Serial.println(F("Debug: Firmware version 1.0"));
+    Serial.println(F("Linear guide controller starting..."));
+    Serial.println(F("Debug: Firmware version 1.0"));
 
     pinMode(PIN_ENABLE, OUTPUT);
     enableDriver(false);
@@ -240,24 +428,24 @@ void setup() {
     stepper.setMaxSpeed(DEFAULT_SPEED_MM_S * STEPS_PER_MM);
     stepper.setAcceleration(DEFAULT_ACCEL_MM_S2 * STEPS_PER_MM);
     stepper.setPinsInverted(true, false, false);
-    // NOTE: The enable line is owned exclusively by enableDriver() / digitalWrite
-    // on PIN_ENABLE. We deliberately do NOT call stepper.setEnablePin() so
-    // AccelStepper never toggles the pin on its own (which would race with our
-    // manual control and could leave the driver disabled or stuck enabled).
 
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);
-    WiFi.hostname("fsk40-linear-drive"); 
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    Serial.printf("Connecting to %s", WIFI_SSID);
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-        delay(250);
-        Serial.print('.');
+    // ---- WiFi connection with fallback to captive portal ----
+    bool wifiOk = false;
+    String eepromSsid, eepromPass;
+
+    if (readCredentials(eepromSsid, eepromPass)) {
+        Serial.println(F("Found stored credentials in EEPROM"));
+        wifiOk = tryConnect(eepromSsid, eepromPass, AP_CONNECT_TIMEOUT_MS);
     }
-    Serial.println();
-if (WiFi.status() == WL_CONNECTED) {
+
+#ifdef WIFI_SSID
+    if (!wifiOk) {
+        Serial.println(F("Trying compile-time WiFi credentials"));
+        wifiOk = tryConnect(WIFI_SSID, WIFI_PASSWORD, AP_CONNECT_TIMEOUT_MS);
+    }
+#endif
+
+    if (wifiOk) {
         Serial.println(F("Debug: WiFi connected"));
         Serial.print(F("IP: "));
         Serial.println(WiFi.localIP());
@@ -268,9 +456,11 @@ if (WiFi.status() == WL_CONNECTED) {
         Serial.println(F(" dBm"));
     } else {
         Serial.println(F("Debug: WiFi connection failed"));
-        Serial.println(F("WiFi not connected, continuing without network."));
+        Serial.println(F("Starting AP mode with captive portal..."));
+        startAPMode();
     }
 
+    // ---- HTTP routes (_always_ registered; handleRoot checks apMode) ----
     server.on("/", handleRoot);
     server.on("/status", handleStatus);
     server.on("/enable", handleEnable);
@@ -280,9 +470,12 @@ if (WiFi.status() == WL_CONNECTED) {
     server.on("/move", handleMove);
     server.on("/jog", handleJog);
     server.on("/profile", handleProfile);
+    server.on("/config", handleConfig);
+    server.on("/save", handleSave);
     server.begin();
     Serial.println(F("HTTP server started"));
 
+    // ---- OTA ----
     ArduinoOTA.setHostname("fsk40-linear-drive");
 
     ArduinoOTA.onStart([]() {
@@ -307,12 +500,12 @@ if (WiFi.status() == WL_CONNECTED) {
 void loop() {
     ArduinoOTA.handle();
 
+    if (apMode) {
+        dnsServer.processNextRequest();
+    }
+
     server.handleClient();
 
-    // Hard end-stop on limit switch (active LOW with INPUT_PULLUP). Latch so
-    // further motion into the switch is refused until the user retreats from
-    // it or re-homes. AccelStepper::stop() only schedules a decel and would
-    // continue driving into the end-stop, so we cancel the target outright.
     if (limitSwitchTriggered()) {
         if (!limitTripped) {
             hardHalt();
